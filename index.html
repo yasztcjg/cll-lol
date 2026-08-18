@@ -1,0 +1,940 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Road to Challenger — Contador de W/L</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:ital,wght@0,400..900;1,400..900&family=Barlow+Condensed:wght@500;600;700&display=swap" rel="stylesheet">
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          ink:    '#0B0B0C',
+          panel:  '#141416',
+          panel2: '#1B1B1E',
+          line:   '#2A2A2E',
+          cream:  '#F4EFE2',
+          muted:  '#8B8B92',
+          red:    '#E23A3A',
+          reddim: '#7A1F1F',
+          win:    '#3FB772',
+          gold:   '#C8A24A'
+        },
+        fontFamily: {
+          display: ['Archivo', 'system-ui', 'sans-serif'],
+          util:    ['"Barlow Condensed"', 'system-ui', 'sans-serif'],
+          body:    ['Archivo', 'system-ui', 'sans-serif']
+        }
+      }
+    }
+  }
+</script>
+<style>
+  html, body { background:#0B0B0C; }
+  body { -webkit-font-smoothing: antialiased; }
+  .display-it { font-family:'Archivo',sans-serif; font-weight:900; font-style:italic; letter-spacing:-0.02em; }
+  .util { font-family:'Barlow Condensed',sans-serif; text-transform:uppercase; letter-spacing:0.12em; }
+  .grid-bg{
+    background-image:
+      linear-gradient(rgba(255,255,255,.028) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(255,255,255,.028) 1px, transparent 1px);
+    background-size: 46px 46px;
+  }
+  input, select, textarea { outline:none; }
+  input:focus-visible, select:focus-visible, button:focus-visible, textarea:focus-visible {
+    outline:2px solid #E23A3A; outline-offset:2px;
+  }
+  ::-webkit-scrollbar{width:10px;height:10px}
+  ::-webkit-scrollbar-track{background:#0B0B0C}
+  ::-webkit-scrollbar-thumb{background:#2A2A2E;border-radius:6px}
+  .no-spin::-webkit-outer-spin-button,.no-spin::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+  .no-spin{-moz-appearance:textfield}
+  @keyframes pop { 0%{transform:scale(.94);opacity:.4} 100%{transform:scale(1);opacity:1} }
+  .pop { animation: pop .18s ease-out; }
+  @media (prefers-reduced-motion: reduce){ .pop{animation:none} * { transition:none !important } }
+</style>
+</head>
+<body class="bg-ink text-cream font-body">
+<div id="root"></div>
+
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useRef, useCallback } = React;
+
+/* ------------------------------------------------------------------ */
+/* Constantes de rango                                                 */
+/* ------------------------------------------------------------------ */
+const TIERS_LOW = ["IRON","BRONZE","SILVER","GOLD","PLATINUM","EMERALD","DIAMOND"];
+const TIER_ES = { IRON:"Hierro", BRONZE:"Bronce", SILVER:"Plata", GOLD:"Oro", PLATINUM:"Platino",
+                  EMERALD:"Esmeralda", DIAMOND:"Diamante", MASTER:"Maestro",
+                  GRANDMASTER:"Gran Maestro", CHALLENGER:"Aspirante" };
+const DIVS = ["IV","III","II","I"];
+const APEX = ["MASTER","GRANDMASTER","CHALLENGER"];
+const MASTER_BASE = TIERS_LOW.length * 400;           // 2800 LP = Maestro 0 LP
+const REGIONS = ["LAN","LAS","NA","BR","EUW","EUNE","KR","JP","OCE","TR","RU","TW","VN","SG","PH","TH","ME"];
+const QUEUES  = ["Solo/Duo","Flex"];
+const WINRATES = [0.55, 0.60, 0.65, 0.70];
+
+const uid = () => Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-4);
+
+/* LP absoluto en una sola escala (Hierro IV = 0, Maestro 0 = 2800) */
+function toAbs(tier, div, lp) {
+  const n = Number(lp) || 0;
+  if (APEX.includes(tier)) return MASTER_BASE + n;
+  const ti = Math.max(0, TIERS_LOW.indexOf(tier));
+  const di = Math.max(0, DIVS.indexOf(div));
+  return ti * 400 + di * 100 + n;
+}
+
+function fromAbs(abs, cutoffs) {
+  const a = Math.max(0, Math.round(abs));
+  if (a >= MASTER_BASE) {
+    const lp = a - MASTER_BASE;
+    let name = "MASTER";
+    if (cutoffs && cutoffs.CHALLENGER && lp >= cutoffs.CHALLENGER) name = "CHALLENGER";
+    else if (cutoffs && cutoffs.GRANDMASTER && lp >= cutoffs.GRANDMASTER) name = "GRANDMASTER";
+    return { tier: name, div: "", lp, label: TIER_ES[name], full: `${TIER_ES[name]} — ${lp} LP` };
+  }
+  const ti = Math.min(TIERS_LOW.length - 1, Math.floor(a / 400));
+  const rest = a - ti * 400;
+  const di = Math.min(3, Math.floor(rest / 100));
+  const lp = rest - di * 100;
+  const tier = TIERS_LOW[ti];
+  return { tier, div: DIVS[di], lp, label: `${TIER_ES[tier]} ${DIVS[di]}`, full: `${TIER_ES[tier]} ${DIVS[di]} — ${lp} LP` };
+}
+
+/* Misma fórmula que usan las calculadoras de net wins */
+const winsNeededFor = (diffLP, lpWin) => Math.max(0, Math.ceil(diffLP / Math.max(1, lpWin)));
+function gamesForWinrate(winsNeeded, wr) {
+  if (wr <= 0.5) return null;
+  return Math.round(winsNeeded / (2 * wr - 1));
+}
+function splitWL(games, wr) {
+  // toFixed evita que 680*0.55 = 374.0000000000001 y redondee de más
+  const w = Math.ceil(Number((games * wr).toFixed(6)));
+  return { w, l: games - w };
+}
+const fmt = (n) => new Intl.NumberFormat("es-CO").format(Math.round(n));
+
+/* ------------------------------------------------------------------ */
+/* Almacenamiento local (cache / modo offline)                         */
+/* ------------------------------------------------------------------ */
+const mem = {};
+const local = {
+  get(k) { try { return window.localStorage.getItem(k); } catch (e) { return mem[k] ?? null; } },
+  set(k, v) { try { window.localStorage.setItem(k, v); } catch (e) { mem[k] = v; } }
+};
+
+/* ------------------------------------------------------------------ */
+/* Estado por defecto                                                  */
+/* ------------------------------------------------------------------ */
+function newAccount(name = "Cuenta nueva") {
+  return {
+    id: uid(),
+    name,
+    region: "LAN",
+    queue: "Solo/Duo",
+    startTier: "MASTER",
+    startDiv: "I",
+    startLp: 0,
+    goalType: "CHALLENGER",       // CHALLENGER | GRANDMASTER | CUSTOM
+    goalTier: "MASTER", goalDiv: "I", goalLp: 500,
+    lpWin: 20,
+    lpLoss: 20,
+    createdAt: Date.now(),
+    games: []
+  };
+}
+const defaultState = () => ({
+  version: 1,
+  accounts: [],
+  activeId: null,
+  cutoffs: { LAN: { CHALLENGER: 1471, GRANDMASTER: 975, updatedAt: null } },
+  updatedAt: Date.now()
+});
+
+/* ------------------------------------------------------------------ */
+/* Cálculo por cuenta                                                  */
+/* ------------------------------------------------------------------ */
+function computeAccount(acc, cutoffs) {
+  const games = acc.games || [];
+  const wins = games.filter(g => g.result === "W").length;
+  const losses = games.length - wins;
+  const netLp = games.reduce((s, g) => s + (Number(g.lp) || 0), 0);
+  const startAbs = toAbs(acc.startTier, acc.startDiv, acc.startLp);
+  const currentAbs = startAbs + netLp;
+  const cut = cutoffs[acc.region] || {};
+
+  let goalAbs;
+  if (acc.goalType === "CHALLENGER") goalAbs = MASTER_BASE + (cut.CHALLENGER || 1000);
+  else if (acc.goalType === "GRANDMASTER") goalAbs = MASTER_BASE + (cut.GRANDMASTER || 500);
+  else goalAbs = toAbs(acc.goalTier, acc.goalDiv, acc.goalLp);
+
+  const diff = Math.max(0, goalAbs - currentAbs);
+  const winsNeeded = winsNeededFor(diff, acc.lpWin);
+  const wr = games.length ? wins / games.length : 0;
+  const projGames = games.length >= 5 ? gamesForWinrate(winsNeeded, wr) : null;
+
+  const total = Math.max(1, goalAbs - startAbs);
+  const progress = Math.max(0, Math.min(100, ((currentAbs - startAbs) / total) * 100));
+
+  // Racha actual
+  let streak = 0, streakType = null;
+  for (let i = games.length - 1; i >= 0; i--) {
+    if (streakType === null) { streakType = games[i].result; streak = 1; }
+    else if (games[i].result === streakType) streak++;
+    else break;
+  }
+
+  const table = WINRATES.map(w => {
+    const g = gamesForWinrate(winsNeeded, w);
+    const s = g ? splitWL(g, w) : null;
+    return { wr: w, games: g, ...(s || {}) };
+  });
+
+  return { wins, losses, netLp, startAbs, currentAbs, goalAbs, diff, winsNeeded,
+           wr, projGames, progress, streak, streakType, table, cut,
+           current: fromAbs(currentAbs, cut), goal: fromAbs(goalAbs, cut), start: fromAbs(startAbs, cut) };
+}
+
+/* ------------------------------------------------------------------ */
+/* UI base                                                             */
+/* ------------------------------------------------------------------ */
+const Label = ({ children }) => (
+  <span className="util text-[11px] text-muted block mb-1.5">{children}</span>
+);
+
+const Field = ({ label, children }) => (
+  <label className="block">{label && <Label>{label}</Label>}{children}</label>
+);
+
+const inputCls = "w-full bg-panel2 border border-line rounded-md px-3 py-2.5 text-cream text-[15px] placeholder:text-muted/60";
+const selCls = inputCls + " appearance-none bg-[url('data:image/svg+xml;utf8,<svg xmlns=%22http://www.w3.org/2000/svg%22 width=%2212%22 height=%228%22><path d=%22M1 1l5 5 5-5%22 fill=%22none%22 stroke=%22%238B8B92%22 stroke-width=%221.5%22/></svg>')] bg-no-repeat bg-[right_12px_center] pr-9";
+
+function Btn({ children, onClick, tone = "ghost", className = "", ...rest }) {
+  const tones = {
+    red: "bg-red hover:bg-[#c93030] text-white border-transparent",
+    solid: "bg-cream hover:bg-white text-ink border-transparent",
+    ghost: "bg-panel2 hover:bg-line text-cream border-line",
+    danger: "bg-transparent hover:bg-reddim/30 text-red border-reddim"
+  };
+  return (
+    <button onClick={onClick}
+      className={`util text-[12px] px-4 py-2.5 rounded-md border transition-colors ${tones[tone]} ${className}`}
+      {...rest}>{children}</button>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Riel de progreso — el elemento principal                            */
+/* ------------------------------------------------------------------ */
+function Rail({ c, acc }) {
+  const cut = c.cut || {};
+  const marks = [];
+  const span = Math.max(1, c.goalAbs - c.startAbs);
+  const pct = (abs) => ((abs - c.startAbs) / span) * 100;
+
+  if (cut.GRANDMASTER) marks.push({ p: pct(MASTER_BASE + cut.GRANDMASTER), t: "GM", lp: cut.GRANDMASTER });
+  if (cut.CHALLENGER) marks.push({ p: pct(MASTER_BASE + cut.CHALLENGER), t: "CHALL", lp: cut.CHALLENGER });
+
+  return (
+    <div className="pt-8 pb-3">
+      <div className="relative h-[3px] bg-line rounded-full">
+        <div className="absolute inset-y-0 left-0 bg-red rounded-full transition-[width] duration-500"
+             style={{ width: c.progress + "%" }} />
+        {marks.filter(m => m.p > 2 && m.p < 98).map((m, i) => (
+          <div key={i} className="absolute -top-[9px]" style={{ left: m.p + "%" }}>
+            <div className="w-px h-[21px] bg-line" />
+            <div className="util text-[9px] text-muted mt-1 -translate-x-1/2 whitespace-nowrap">{m.t} {fmt(m.lp)}</div>
+          </div>
+        ))}
+        <div className="absolute -top-[7px] -translate-x-1/2 pop" style={{ left: Math.min(100, c.progress) + "%" }}>
+          <div className="w-[17px] h-[17px] rounded-full bg-red border-[3px] border-ink shadow-[0_0_0_1px_#E23A3A]" />
+        </div>
+      </div>
+      <div className="flex justify-between mt-3.5">
+        <div>
+          <div className="util text-[10px] text-muted">Inicio</div>
+          <div className="util text-[13px] text-cream">{c.start.label} — {fmt(c.start.lp)} LP</div>
+        </div>
+        <div className="text-center">
+          <div className="util text-[10px] text-muted">Ahora</div>
+          <div className="util text-[13px] text-red">{c.current.label} — {fmt(c.current.lp)} LP</div>
+        </div>
+        <div className="text-right">
+          <div className="util text-[10px] text-muted">Meta</div>
+          <div className="util text-[13px] text-cream">{c.goal.label} — {fmt(c.goal.lp)} LP</div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Formulario de cuenta                                                */
+/* ------------------------------------------------------------------ */
+function AccountForm({ acc, cutoffs, onSave, onCancel, onDelete }) {
+  const [f, setF] = useState({ ...acc });
+  const set = (k, v) => setF(p => ({ ...p, [k]: v }));
+  const isApex = APEX.includes(f.startTier);
+  const goalApex = APEX.includes(f.goalTier);
+
+  return (
+    <div className="fixed inset-0 z-40 bg-black/75 flex items-start md:items-center justify-center p-4 overflow-y-auto">
+      <div className="w-full max-w-2xl bg-panel border border-line rounded-xl p-6 my-6">
+        <h2 className="display-it text-2xl mb-6">{acc.games && acc.games.length ? "Editar cuenta" : "Nueva cuenta"}</h2>
+
+        <div className="grid md:grid-cols-3 gap-4">
+          <div className="md:col-span-3">
+            <Field label="Invocador">
+              <input className={inputCls} value={f.name} onChange={e => set("name", e.target.value)}
+                     placeholder="DAI Yasz#jglr" />
+            </Field>
+          </div>
+          <Field label="Región">
+            <select className={selCls} value={f.region} onChange={e => set("region", e.target.value)}>
+              {REGIONS.map(r => <option key={r} value={r}>{r}</option>)}
+            </select>
+          </Field>
+          <Field label="Cola">
+            <select className={selCls} value={f.queue} onChange={e => set("queue", e.target.value)}>
+              {QUEUES.map(q => <option key={q} value={q}>{q}</option>)}
+            </select>
+          </Field>
+          <div />
+        </div>
+
+        <div className="border-t border-line mt-6 pt-5">
+          <div className="util text-[11px] text-red mb-3">Punto de partida</div>
+          <div className="grid grid-cols-2 md:grid-cols-3 gap-4">
+            <Field label="Rango">
+              <select className={selCls} value={f.startTier} onChange={e => set("startTier", e.target.value)}>
+                {[...TIERS_LOW, ...APEX].map(t => <option key={t} value={t}>{TIER_ES[t]}</option>)}
+              </select>
+            </Field>
+            <Field label="División">
+              <select className={selCls} value={f.startDiv} disabled={isApex}
+                      onChange={e => set("startDiv", e.target.value)}
+                      style={{ opacity: isApex ? .4 : 1 }}>
+                {DIVS.map(d => <option key={d} value={d}>{d}</option>)}
+              </select>
+            </Field>
+            <Field label="LP">
+              <input type="number" className={inputCls + " no-spin"} value={f.startLp}
+                     onChange={e => set("startLp", Number(e.target.value))} />
+            </Field>
+          </div>
+          <p className="text-[12px] text-muted mt-2">
+            Es el rango con el que arrancas el registro. Las partidas que agregues se suman o restan sobre esto.
+          </p>
+        </div>
+
+        <div className="border-t border-line mt-6 pt-5">
+          <div className="util text-[11px] text-red mb-3">Meta</div>
+          <div className="grid md:grid-cols-3 gap-4">
+            <Field label="Objetivo">
+              <select className={selCls} value={f.goalType} onChange={e => set("goalType", e.target.value)}>
+                <option value="CHALLENGER">Aspirante (corte actual)</option>
+                <option value="GRANDMASTER">Gran Maestro (corte actual)</option>
+                <option value="CUSTOM">Rango específico</option>
+              </select>
+            </Field>
+            {f.goalType === "CUSTOM" ? (
+              <React.Fragment>
+                <Field label="Rango meta">
+                  <select className={selCls} value={f.goalTier} onChange={e => set("goalTier", e.target.value)}>
+                    {[...TIERS_LOW, ...APEX].map(t => <option key={t} value={t}>{TIER_ES[t]}</option>)}
+                  </select>
+                </Field>
+                <div className="grid grid-cols-2 gap-3">
+                  <Field label="División">
+                    <select className={selCls} value={f.goalDiv} disabled={goalApex}
+                            onChange={e => set("goalDiv", e.target.value)}
+                            style={{ opacity: goalApex ? .4 : 1 }}>
+                      {DIVS.map(d => <option key={d} value={d}>{d}</option>)}
+                    </select>
+                  </Field>
+                  <Field label="LP">
+                    <input type="number" className={inputCls + " no-spin"} value={f.goalLp}
+                           onChange={e => set("goalLp", Number(e.target.value))} />
+                  </Field>
+                </div>
+              </React.Fragment>
+            ) : (
+              <div className="md:col-span-2 flex items-end">
+                <p className="text-[12px] text-muted pb-2.5">
+                  Usa el corte de {f.region} guardado en Cortes de LP: {" "}
+                  <span className="text-cream">
+                    {fmt((cutoffs[f.region] || {})[f.goalType] || 0)} LP
+                  </span>.
+                </p>
+              </div>
+            )}
+          </div>
+        </div>
+
+        <div className="border-t border-line mt-6 pt-5">
+          <div className="util text-[11px] text-red mb-3">LP promedio por partida</div>
+          <div className="grid grid-cols-2 gap-4 max-w-sm">
+            <Field label="Ganas">
+              <input type="number" className={inputCls + " no-spin"} value={f.lpWin}
+                     onChange={e => set("lpWin", Math.max(1, Number(e.target.value)))} />
+            </Field>
+            <Field label="Pierdes">
+              <input type="number" className={inputCls + " no-spin"} value={f.lpLoss}
+                     onChange={e => set("lpLoss", Math.max(1, Number(e.target.value)))} />
+            </Field>
+          </div>
+          <p className="text-[12px] text-muted mt-2">
+            Valor por defecto de cada partida. Al registrar una puedes cambiar el LP exacto.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-3 mt-7">
+          <Btn tone="red" onClick={() => onSave(f)}>Guardar cuenta</Btn>
+          <Btn onClick={onCancel}>Cancelar</Btn>
+          {onDelete && <Btn tone="danger" className="ml-auto" onClick={onDelete}>Eliminar cuenta</Btn>}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Panel de cortes de LP                                               */
+/* ------------------------------------------------------------------ */
+function CutoffPanel({ region, cutoffs, setCutoffs, onClose }) {
+  const [reg, setReg] = useState(region);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const c = cutoffs[reg] || { CHALLENGER: 0, GRANDMASTER: 0 };
+
+  const setVal = (tier, v) =>
+    setCutoffs({ ...cutoffs, [reg]: { ...c, [tier]: Number(v) || 0, updatedAt: Date.now() } });
+
+  const fetchNow = async () => {
+    setBusy(true); setErr("");
+    try {
+      const [ch, gm] = await Promise.all([
+        fetch(`/api/cutoff?region=${reg}&tier=challenger`).then(r => r.json()),
+        fetch(`/api/cutoff?region=${reg}&tier=grandmaster`).then(r => r.json())
+      ]);
+      if (!ch.lp && !gm.lp) throw new Error("Sin datos");
+      setCutoffs({
+        ...cutoffs,
+        [reg]: {
+          CHALLENGER: ch.lp || c.CHALLENGER,
+          GRANDMASTER: gm.lp || c.GRANDMASTER,
+          updatedAt: Date.now()
+        }
+      });
+    } catch (e) {
+      setErr("No se pudo leer el corte. Escríbelo a mano desde replays.lol.");
+    }
+    setBusy(false);
+  };
+
+  return (
+    <div className="fixed inset-0 z-40 bg-black/75 flex items-center justify-center p-4">
+      <div className="w-full max-w-md bg-panel border border-line rounded-xl p-6">
+        <h2 className="display-it text-2xl mb-1">Cortes de LP</h2>
+        <p className="text-[13px] text-muted mb-5">
+          El LP que se necesita hoy para entrar a cada rango. Cambia cada día.
+        </p>
+
+        <Field label="Región">
+          <select className={selCls} value={reg} onChange={e => setReg(e.target.value)}>
+            {REGIONS.map(r => <option key={r} value={r}>{r}</option>)}
+          </select>
+        </Field>
+
+        <div className="grid grid-cols-2 gap-4 mt-4">
+          <Field label="Aspirante">
+            <input type="number" className={inputCls + " no-spin"} value={c.CHALLENGER || ""}
+                   onChange={e => setVal("CHALLENGER", e.target.value)} />
+          </Field>
+          <Field label="Gran Maestro">
+            <input type="number" className={inputCls + " no-spin"} value={c.GRANDMASTER || ""}
+                   onChange={e => setVal("GRANDMASTER", e.target.value)} />
+          </Field>
+        </div>
+
+        {c.updatedAt && (
+          <p className="text-[12px] text-muted mt-3">
+            Actualizado {new Date(c.updatedAt).toLocaleString("es-CO")}
+          </p>
+        )}
+        {err && <p className="text-[12px] text-red mt-3">{err}</p>}
+
+        <div className="flex flex-wrap gap-3 mt-6">
+          <Btn tone="red" onClick={fetchNow} disabled={busy}>
+            {busy ? "Consultando…" : "Traer corte de hoy"}
+          </Btn>
+          <a href={`https://www.replays.lol/cutoff/${reg}/challenger`} target="_blank" rel="noopener noreferrer">
+            <Btn>Ver en replays.lol</Btn>
+          </a>
+          <Btn className="ml-auto" onClick={onClose}>Listo</Btn>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* Historial                                                           */
+/* ------------------------------------------------------------------ */
+function History({ acc, c, onEdit, onDelete }) {
+  const [all, setAll] = useState(false);
+  const games = acc.games || [];
+  const shown = all ? games : games.slice(-25);
+  if (!games.length) {
+    return (
+      <div className="border border-dashed border-line rounded-lg p-8 text-center">
+        <p className="util text-[13px] text-muted">Aún no hay partidas</p>
+        <p className="text-[13px] text-muted mt-1.5">Registra la primera con Victoria o Derrota.</p>
+      </div>
+    );
+  }
+  // LP acumulado por partida
+  let run = c.startAbs;
+  const rows = games.map(g => { run += Number(g.lp) || 0; return { ...g, abs: run }; });
+  const visible = all ? rows : rows.slice(-25);
+
+  return (
+    <div>
+      <div className="overflow-x-auto -mx-1">
+        <table className="w-full text-[14px]">
+          <thead>
+            <tr className="border-b border-line">
+              {["#", "Fecha", "Resultado", "LP", "Total", "Campeón", ""].map((h, i) => (
+                <th key={i} className="util text-[10px] text-muted text-left font-medium py-2.5 px-2">{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {visible.slice().reverse().map((g, i) => {
+              const idx = games.findIndex(x => x.id === g.id);
+              return (
+                <tr key={g.id} className="border-b border-line/60 hover:bg-panel2/60">
+                  <td className="py-2.5 px-2 text-muted tabular-nums">{idx + 1}</td>
+                  <td className="py-2.5 px-2 text-muted whitespace-nowrap">
+                    {new Date(g.ts).toLocaleString("es-CO", { day: "2-digit", month: "short", hour: "2-digit", minute: "2-digit" })}
+                  </td>
+                  <td className="py-2.5 px-2">
+                    <span className={`util text-[11px] px-2 py-1 rounded ${g.result === "W" ? "bg-win/15 text-win" : "bg-red/15 text-red"}`}>
+                      {g.result === "W" ? "Victoria" : "Derrota"}
+                    </span>
+                  </td>
+                  <td className="py-2.5 px-2">
+                    <input type="number" value={g.lp} onChange={e => onEdit(g.id, { lp: Number(e.target.value) })}
+                           className="no-spin w-16 bg-transparent border border-transparent hover:border-line focus:border-line rounded px-1.5 py-1 tabular-nums" />
+                  </td>
+                  <td className="py-2.5 px-2 tabular-nums text-muted">{fmt(g.abs - MASTER_BASE >= 0 ? g.abs - MASTER_BASE : g.abs)}</td>
+                  <td className="py-2.5 px-2">
+                    <input value={g.champ || ""} placeholder="—" onChange={e => onEdit(g.id, { champ: e.target.value })}
+                           className="w-28 bg-transparent border border-transparent hover:border-line focus:border-line rounded px-1.5 py-1 placeholder:text-muted/50" />
+                  </td>
+                  <td className="py-2.5 px-2 text-right">
+                    <button onClick={() => onDelete(g.id)}
+                            className="util text-[10px] text-muted hover:text-red px-2 py-1">Borrar</button>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {games.length > 25 && (
+        <button onClick={() => setAll(!all)} className="util text-[11px] text-muted hover:text-cream mt-4">
+          {all ? "Mostrar solo las últimas 25" : `Ver las ${games.length} partidas`}
+        </button>
+      )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* App                                                                 */
+/* ------------------------------------------------------------------ */
+function App() {
+  const [key, setKey] = useState(() => local.get("rtc_key") || "");
+  const [state, setState] = useState(defaultState);
+  const [loaded, setLoaded] = useState(false);
+  const [sync, setSync] = useState("idle");     // idle | loading | saving | saved | offline
+  const [editing, setEditing] = useState(null);
+  const [showCut, setShowCut] = useState(false);
+  const [lpInput, setLpInput] = useState("");
+  const skipSave = useRef(true);
+  const timer = useRef(null);
+
+  const acc = useMemo(
+    () => state.accounts.find(a => a.id === state.activeId) || state.accounts[0] || null,
+    [state]
+  );
+  const c = useMemo(() => acc ? computeAccount(acc, state.cutoffs) : null, [acc, state.cutoffs]);
+
+  /* ---- Cargar ---- */
+  const load = useCallback(async (k) => {
+    setSync("loading");
+    const cached = local.get("rtc_data_" + k);
+    if (cached) { try { setState(JSON.parse(cached)); } catch (e) {} }
+    try {
+      const r = await fetch("/api/state?key=" + encodeURIComponent(k));
+      if (!r.ok) throw new Error();
+      const j = await r.json();
+      if (j && j.data && j.data.accounts) {
+        setState({ ...defaultState(), ...j.data });
+        local.set("rtc_data_" + k, JSON.stringify(j.data));
+      }
+      setSync("saved");
+    } catch (e) {
+      setSync(cached ? "offline" : "offline");
+    }
+    skipSave.current = true;
+    setLoaded(true);
+  }, []);
+
+  useEffect(() => { if (key) load(key); else setLoaded(true); }, []);
+
+  /* ---- Guardar (debounce) ---- */
+  useEffect(() => {
+    if (!loaded) return;
+    if (skipSave.current) { skipSave.current = false; return; }
+    local.set("rtc_data_" + key, JSON.stringify(state));
+    if (!key) return;
+    setSync("saving");
+    clearTimeout(timer.current);
+    timer.current = setTimeout(async () => {
+      try {
+        const r = await fetch("/api/state", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ key, data: { ...state, updatedAt: Date.now() } })
+        });
+        setSync(r.ok ? "saved" : "offline");
+      } catch (e) { setSync("offline"); }
+    }, 1200);
+  }, [state, key, loaded]);
+
+  const update = (fn) => setState(s => ({ ...s, ...fn(s) }));
+
+  const patchAccount = (id, patch) =>
+    setState(s => ({ ...s, accounts: s.accounts.map(a => a.id === id ? { ...a, ...patch } : a) }));
+
+  /* ---- Acciones ---- */
+  const addGame = (result) => {
+    if (!acc) return;
+    const manual = parseInt(lpInput, 10);
+    const base = result === "W" ? Math.abs(acc.lpWin) : -Math.abs(acc.lpLoss);
+    const lp = Number.isFinite(manual) && lpInput !== ""
+      ? (result === "W" ? Math.abs(manual) : -Math.abs(manual))
+      : base;
+    patchAccount(acc.id, { games: [...(acc.games || []), { id: uid(), result, lp, ts: Date.now(), champ: "" }] });
+    setLpInput("");
+  };
+  const undo = () => {
+    if (!acc || !acc.games.length) return;
+    patchAccount(acc.id, { games: acc.games.slice(0, -1) });
+  };
+  const editGame = (gid, patch) =>
+    patchAccount(acc.id, { games: acc.games.map(g => g.id === gid ? { ...g, ...patch } : g) });
+  const deleteGame = (gid) =>
+    patchAccount(acc.id, { games: acc.games.filter(g => g.id !== gid) });
+
+  const saveAccount = (f) => {
+    setState(s => {
+      const exists = s.accounts.some(a => a.id === f.id);
+      return {
+        ...s,
+        accounts: exists ? s.accounts.map(a => a.id === f.id ? f : a) : [...s.accounts, f],
+        activeId: f.id
+      };
+    });
+    setEditing(null);
+  };
+  const deleteAccount = (id) =>
+    setState(s => {
+      const rest = s.accounts.filter(a => a.id !== id);
+      return { ...s, accounts: rest, activeId: rest.length ? rest[0].id : null };
+    });
+
+  /* ---- Teclas W / L ---- */
+  useEffect(() => {
+    const h = (e) => {
+      const t = e.target.tagName;
+      if (t === "INPUT" || t === "SELECT" || t === "TEXTAREA") return;
+      if (e.key === "w" || e.key === "W") addGame("W");
+      if (e.key === "l" || e.key === "L") addGame("L");
+      if ((e.key === "z" || e.key === "Z") && (e.ctrlKey || e.metaKey)) undo();
+    };
+    window.addEventListener("keydown", h);
+    return () => window.removeEventListener("keydown", h);
+  }, [acc, lpInput]);
+
+  /* ---- Exportar CSV ---- */
+  const download = (name, text) => {
+    const blob = new Blob(["\uFEFF" + text], { type: "text/csv;charset=utf-8;" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+  const exportAccount = () => {
+    if (!acc) return;
+    let run = c.startAbs, i = 0;
+    const lines = [
+      ["Cuenta", acc.name].join(";"),
+      ["Region", acc.region, "Cola", acc.queue].join(";"),
+      ["Inicio", c.start.full].join(";"),
+      ["Actual", c.current.full].join(";"),
+      ["Meta", c.goal.full].join(";"),
+      ["Victorias", c.wins, "Derrotas", c.losses, "Winrate", (c.wr * 100).toFixed(1) + "%"].join(";"),
+      ["Victorias netas restantes", c.winsNeeded].join(";"),
+      "",
+      ["#", "Fecha", "Hora", "Resultado", "LP", "LP acumulado", "Campeon"].join(";")
+    ];
+    (acc.games || []).forEach(g => {
+      run += Number(g.lp) || 0; i++;
+      const d = new Date(g.ts);
+      lines.push([i, d.toLocaleDateString("es-CO"), d.toLocaleTimeString("es-CO"),
+                  g.result === "W" ? "Victoria" : "Derrota", g.lp,
+                  run - MASTER_BASE >= 0 ? run - MASTER_BASE : run, g.champ || ""].join(";"));
+    });
+    download(`${acc.name.replace(/[^\w-]+/g, "_")}_registro.csv`, lines.join("\n"));
+  };
+  const exportAll = () => {
+    const lines = [["Cuenta", "Region", "Cola", "Partidas", "Victorias", "Derrotas", "Winrate", "LP actual", "Meta LP", "Victorias restantes"].join(";")];
+    state.accounts.forEach(a => {
+      const k = computeAccount(a, state.cutoffs);
+      lines.push([a.name, a.region, a.queue, a.games.length, k.wins, k.losses,
+                  (k.wr * 100).toFixed(1) + "%", k.current.lp, k.goal.lp, k.winsNeeded].join(";"));
+    });
+    download("todas_las_cuentas.csv", lines.join("\n"));
+  };
+
+  /* ---- Pantalla de acceso ---- */
+  if (!key && loaded) {
+    return (
+      <div className="min-h-screen grid-bg flex items-center justify-center p-6">
+        <div className="w-full max-w-md bg-panel border border-line rounded-xl p-8">
+          <h1 className="display-it text-3xl leading-none">ROAD TO <span className="text-red">CHALLENGER</span></h1>
+          <p className="text-[14px] text-muted mt-3 mb-6">
+            Elige una clave personal. Con esa misma clave abres tu registro desde cualquier computador.
+          </p>
+          <Field label="Tu clave">
+            <input className={inputCls} placeholder="ej. yasz-jglr-2026" autoFocus
+                   onKeyDown={e => { if (e.key === "Enter" && e.target.value.trim().length >= 4) { const v = e.target.value.trim(); local.set("rtc_key", v); setKey(v); load(v); } }}
+                   id="keyin" />
+          </Field>
+          <Btn tone="red" className="mt-5 w-full" onClick={() => {
+            const v = document.getElementById("keyin").value.trim();
+            if (v.length < 4) return;
+            local.set("rtc_key", v); setKey(v); load(v);
+          }}>Entrar</Btn>
+          <p className="text-[12px] text-muted mt-4">
+            Mínimo 4 caracteres. No es una contraseña con seguridad fuerte: cualquiera que la sepa ve tu registro.
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  const syncTxt = { idle: "", loading: "Cargando…", saving: "Guardando…", saved: "Guardado", offline: "Solo local" }[sync];
+  const syncCol = sync === "offline" ? "text-gold" : sync === "saved" ? "text-win" : "text-muted";
+
+  return (
+    <div className="min-h-screen grid-bg">
+      {/* Cabecera */}
+      <header className="border-b border-line">
+        <div className="max-w-6xl mx-auto px-5 py-5 flex flex-wrap items-center gap-4">
+          <h1 className="display-it text-xl md:text-2xl leading-none mr-auto">
+            ROAD TO <span className="text-red">CHALLENGER</span>
+          </h1>
+          <span className={`util text-[11px] ${syncCol}`}>{syncTxt}</span>
+          <button onClick={() => setShowCut(true)} className="util text-[11px] text-muted hover:text-cream">Cortes de LP</button>
+          <button onClick={() => { local.set("rtc_key", ""); setKey(""); setState(defaultState()); }}
+                  className="util text-[11px] text-muted hover:text-cream">Salir</button>
+        </div>
+      </header>
+
+      {/* Cuentas */}
+      <div className="max-w-6xl mx-auto px-5 pt-5">
+        <div className="flex flex-wrap items-center gap-2">
+          {state.accounts.map(a => {
+            const on = acc && a.id === acc.id;
+            return (
+              <button key={a.id} onClick={() => update(() => ({ activeId: a.id }))}
+                className={`util text-[12px] px-3.5 py-2 rounded-md border transition-colors ${
+                  on ? "bg-red text-white border-transparent" : "bg-panel text-muted border-line hover:text-cream"}`}>
+                {a.name}<span className="opacity-60 ml-2">{a.region}</span>
+              </button>
+            );
+          })}
+          <button onClick={() => setEditing(newAccount(""))}
+                  className="util text-[12px] px-3.5 py-2 rounded-md border border-dashed border-line text-muted hover:text-cream">
+            + Agregar cuenta
+          </button>
+          {acc && (
+            <button onClick={() => setEditing(acc)}
+                    className="util text-[11px] text-muted hover:text-cream ml-auto">Editar cuenta</button>
+          )}
+        </div>
+      </div>
+
+      {!acc ? (
+        <div className="max-w-6xl mx-auto px-5 py-20 text-center">
+          <p className="display-it text-3xl text-muted">Sin cuentas todavía</p>
+          <p className="text-[15px] text-muted mt-3 mb-6">Agrega tu primera cuenta para empezar a contar.</p>
+          <Btn tone="red" onClick={() => setEditing(newAccount(""))}>Agregar cuenta</Btn>
+        </div>
+      ) : (
+        <main className="max-w-6xl mx-auto px-5 py-6 space-y-5">
+
+          {/* Meta grande + riel */}
+          <section className="bg-panel border border-line rounded-xl px-6 md:px-8 pt-7 pb-6">
+            <div className="text-center">
+              <div className="util text-[11px] text-muted">Te faltan</div>
+              <div className="display-it text-[64px] md:text-[92px] leading-[0.9] mt-1 pop" key={c.winsNeeded}>
+                {fmt(c.winsNeeded)} <span className="text-red">{c.winsNeeded === 1 ? "WIN" : "WINS"}</span>
+              </div>
+              <div className="util text-[12px] text-muted mt-2">
+                netas · {fmt(c.diff)} LP para {c.goal.label}
+              </div>
+            </div>
+            <Rail c={c} acc={acc} />
+          </section>
+
+          {/* Contador */}
+          <section className="grid md:grid-cols-[1fr_auto] gap-5 items-stretch">
+            <div className="bg-panel border border-line rounded-xl p-6">
+              <div className="flex items-center justify-between mb-5">
+                <span className="util text-[11px] text-muted">Registrar partida</span>
+                <span className="util text-[10px] text-muted/70">Teclas W · L · Ctrl+Z</span>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <button onClick={() => addGame("W")}
+                        className="group border border-win/40 hover:border-win bg-win/10 hover:bg-win/20 rounded-lg py-7 transition-colors">
+                  <div className="display-it text-4xl text-win">+1</div>
+                  <div className="util text-[12px] text-win/80 mt-1">Victoria</div>
+                </button>
+                <button onClick={() => addGame("L")}
+                        className="group border border-red/40 hover:border-red bg-red/10 hover:bg-red/20 rounded-lg py-7 transition-colors">
+                  <div className="display-it text-4xl text-red">−1</div>
+                  <div className="util text-[12px] text-red/80 mt-1">Derrota</div>
+                </button>
+              </div>
+              <div className="flex flex-wrap items-end gap-4 mt-5">
+                <div className="w-32">
+                  <Field label="LP de esta partida">
+                    <input type="number" className={inputCls + " no-spin"} value={lpInput}
+                           placeholder={`${acc.lpWin} / ${acc.lpLoss}`}
+                           onChange={e => setLpInput(e.target.value)} />
+                  </Field>
+                </div>
+                <Btn onClick={undo} disabled={!acc.games.length}
+                     className={!acc.games.length ? "opacity-40" : ""}>Deshacer última</Btn>
+                <div className="ml-auto text-right">
+                  <div className="util text-[10px] text-muted">Racha</div>
+                  <div className={`util text-[15px] ${c.streakType === "W" ? "text-win" : c.streakType === "L" ? "text-red" : "text-muted"}`}>
+                    {c.streak ? `${c.streak} ${c.streakType === "W" ? "victorias" : "derrotas"}` : "—"}
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className="bg-panel border border-line rounded-xl p-6 grid grid-cols-2 md:grid-cols-1 gap-5 md:w-64">
+              {[
+                { l: "Partidas", v: fmt(acc.games.length), col: "text-cream" },
+                { l: "Victorias / Derrotas", v: `${fmt(c.wins)} — ${fmt(c.losses)}`, col: "text-cream" },
+                { l: "Winrate", v: acc.games.length ? (c.wr * 100).toFixed(1) + "%" : "—",
+                  col: c.wr > 0.5 ? "text-win" : acc.games.length ? "text-red" : "text-muted" },
+                { l: "LP neto", v: (c.netLp >= 0 ? "+" : "") + fmt(c.netLp),
+                  col: c.netLp >= 0 ? "text-win" : "text-red" }
+              ].map((s, i) => (
+                <div key={i}>
+                  <div className="util text-[10px] text-muted">{s.l}</div>
+                  <div className={`display-it text-2xl mt-0.5 ${s.col}`}>{s.v}</div>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          {/* Proyección */}
+          <section className="bg-panel border border-line rounded-xl p-6">
+            <div className="util text-[11px] text-muted mb-4">Partidas necesarias según winrate</div>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              {c.table.map(t => (
+                <div key={t.wr} className="bg-panel2 border border-line rounded-lg p-4 text-center">
+                  <div className="util text-[11px] text-muted">{Math.round(t.wr * 100)}% winrate</div>
+                  <div className="display-it text-3xl text-red mt-1">{t.games ? fmt(t.games) : "∞"}</div>
+                  <div className="util text-[11px] text-muted mt-1">
+                    {t.games ? `${fmt(t.w)}V · ${fmt(t.l)}D` : "no alcanza"}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div className="border-t border-line mt-5 pt-4 text-[14px]">
+              {acc.games.length < 5 ? (
+                <span className="text-muted">Registra al menos 5 partidas para ver tu proyección real.</span>
+              ) : c.winsNeeded === 0 ? (
+                <span className="text-win">Meta alcanzada. Cambia la meta para seguir contando.</span>
+              ) : c.wr <= 0.5 ? (
+                <span className="text-red">
+                  Con {(c.wr * 100).toFixed(1)}% de winrate no subes: por debajo de 50% el LP neto es negativo.
+                </span>
+              ) : (
+                <span className="text-cream">
+                  A tu ritmo actual ({(c.wr * 100).toFixed(1)}%) te faltan{" "}
+                  <span className="text-red display-it text-lg">{fmt(c.projGames)}</span> partidas
+                  <span className="text-muted"> · {fmt(splitWL(c.projGames, c.wr).w)}V · {fmt(splitWL(c.projGames, c.wr).l)}D</span>
+                </span>
+              )}
+            </div>
+          </section>
+
+          {/* Historial */}
+          <section className="bg-panel border border-line rounded-xl p-6">
+            <div className="flex flex-wrap items-center gap-3 mb-4">
+              <span className="util text-[11px] text-muted mr-auto">Historial</span>
+              <Btn onClick={exportAccount}>Exportar esta cuenta</Btn>
+              <Btn onClick={exportAll}>Exportar resumen</Btn>
+            </div>
+            <History acc={acc} c={c} onEdit={editGame} onDelete={deleteGame} />
+          </section>
+
+          <p className="text-[12px] text-muted pb-8">
+            El LP acumulado se calcula sobre tu punto de partida. Si tu LP real se desfasa, edita el LP de una partida
+            o ajusta el punto de partida en Editar cuenta.
+          </p>
+        </main>
+      )}
+
+      {editing && (
+        <AccountForm
+          acc={editing}
+          cutoffs={state.cutoffs}
+          onSave={saveAccount}
+          onCancel={() => setEditing(null)}
+          onDelete={state.accounts.some(a => a.id === editing.id)
+            ? () => { deleteAccount(editing.id); setEditing(null); } : null}
+        />
+      )}
+      {showCut && (
+        <CutoffPanel region={acc ? acc.region : "LAN"} cutoffs={state.cutoffs}
+                     setCutoffs={(cu) => update(() => ({ cutoffs: cu }))}
+                     onClose={() => setShowCut(false)} />
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>

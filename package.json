@@ -1,0 +1,13 @@
+{
+  "name": "road-to-challenger",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Contador de victorias y derrotas con meta de LP para League of Legends",
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "mongodb": "^6.8.0"
+  }
+}
